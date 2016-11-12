@@ -8,12 +8,22 @@ import urllib2
 import Queue
 import json
 import logging
+import pika
+from pika import exceptions
 
 SOURCE_URL = 'http://s3.amazonaws.com/waldo-recruiting'
 KEY_TAG = '{http://s3.amazonaws.com/doc/2006-03-01/}Key'
 
-logging.basicConfig()
+logging.basicConfig(level=logging.INFO)
+LOGGER = logging.getLogger(__name__)
 
+# RabbitMQ connection
+credentials = pika.PlainCredentials('guest', 'guest')
+connection = pika.BlockingConnection(pika.ConnectionParameters(
+    host='localhost', port=5672))
+# Create a queue
+channel = connection.channel()
+channel.queue_declare(queue='exifs')
 
 def get_image_keys():
     '''
@@ -21,13 +31,13 @@ def get_image_keys():
     '''
     keys = list()
     # lazy way of dealing with rate limiting
-    done = False
-    while not done:
-        try:
-            data = requests.get(SOURCE_URL)
-            done = True
-        except requests.exceptions.ConnectionError:
-            time.sleep(5)
+    #done = False
+    #while not done:
+    #    try:
+    data = requests.get(SOURCE_URL)
+    #        done = True
+    #    except requests.exceptions.ConnectionError:
+    #        time.sleep(5)
     elems = xml.etree.ElementTree.fromstring(data.text)
     for elem in elems.getiterator(tag=KEY_TAG):
         keys.append(elem.text)
@@ -39,19 +49,18 @@ def index_image_exifs(keys=None):
     Concurrently get all image exif data for each image at the SOURCE_URL+key
     for key in keys. Finally upload that data to the index.
     '''
-    queue = Queue.Queue()
     if not keys:
         keys = get_image_keys()
     for key in keys:
-        thread = threading.Thread(target=get_image_exif, args=(key,queue))
+        thread = threading.Thread(target=get_image_exif, args=(key,))
         thread.start()
 
     # Wait for all of the threads to finish
-    print("Waiting for images to download...")
-    thread.join()
-    print("Images finished downloading.")
+    #LOGGER.info("Waiting for images to download...")
+    #thread.join()
+    #LOGGER.info("Images finished downloading.")
 
-    # is elastic search ready? Really we should use a messaging queue.
+    # is elastic search ready?
     es_ready = False
     while not es_ready:
         es_health = requests.get("http://localhost:9200/_cluster/health")
@@ -64,32 +73,48 @@ def index_image_exifs(keys=None):
 
     # It would be nice to do this concurrently too, but
     # I received a "Slow down" message from elasticsearch
-    # So we'll do it sequentially.
-    while not queue.empty():
-        exif = queue.get()
-        res = requests.post("http://localhost:9200/exif/{}/1".format(exif[0]),
-                            data=exif[1])
-        print(res.text)
-    print("Finished indexing.")
+    # So we'll do it sequentially. You could increase the
+    # ES throughput by sharding and using haproxy.
+    channel.basic_consume(callback,
+                          queue='exifs')
+    channel.start_consuming()
+    LOGGER.info("Creating indexes...")
 
-def get_image_exif(key, queue):
+
+def callback(ch, method, properties, body):
+    '''Callback for a RabbitMQ consumer. Sends exif data to elasticsearch.'''
+    exif = json.loads(body)
+    res = requests.post("http://localhost:9200/exif/{}/1".format(exif.keys()[0]),
+                        data=exif.values()[0])
+    # acknowledge the message
+    ch.basic_ack(delivery_tag = method.delivery_tag)
+    LOGGER.info(" [x] Received %r" % body)
+
+
+def get_image_exif(key):
     '''
-    Get exif data for one image, identified by it's key.
+    Get exif data for one image, identified by it's key and
+    add the resulting key/value tuple to the queue.
     '''
 
     data = urllib2.urlopen("{0}/{1}".format(SOURCE_URL, key))
     image = data.read()
-    # This should log instead of print
-    print('Downloading image: {}'.format(key))
+    # This should log instead of LOGGER.info
+    LOGGER.info('Downloading image: {}'.format(key))
     exif = get_exif(image)
-    queue.put((key, exif))
+    # Send the data to RabbitMQ
+    channel = connection.channel()
+    channel.basic_publish(exchange='',
+                          routing_key='exifs',
+                          body=json.dumps({key: exif}))
+    channel.close()
 
 
 def get_exif(image):
     '''
     Extract the exif data from a raw image.
     '''
-    exif = exifread.process_file(StringIO(image))
+    exif = exifread.process_file(StringIO(image), details=False)
     ret = dict(zip(exif.keys(),
                    # exif values are ifd tag instances, which may
                    # need recursive treatment. Here we convert to

@@ -4,5 +4,10 @@ services:
     image: elasticsearch:5.0
     ports:
       - "9200:9200"
+  rabbitmq:
+    image: rabbitmq:3.6.5-management
+    ports:
+      - "15672:15672"
+      - "5672:5672"
   indexer:
     build: ./indexer
