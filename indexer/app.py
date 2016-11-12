@@ -30,14 +30,7 @@ def get_image_keys():
     Return a list of keys for the images stored in SOURCE_URL.
     '''
     keys = list()
-    # lazy way of dealing with rate limiting
-    #done = False
-    #while not done:
-    #    try:
     data = requests.get(SOURCE_URL)
-    #        done = True
-    #    except requests.exceptions.ConnectionError:
-    #        time.sleep(5)
     elems = xml.etree.ElementTree.fromstring(data.text)
     for elem in elems.getiterator(tag=KEY_TAG):
         keys.append(elem.text)
@@ -54,11 +47,6 @@ def index_image_exifs(keys=None):
     for key in keys:
         thread = threading.Thread(target=get_image_exif, args=(key,))
         thread.start()
-
-    # Wait for all of the threads to finish
-    #LOGGER.info("Waiting for images to download...")
-    #thread.join()
-    #LOGGER.info("Images finished downloading.")
 
     # is elastic search ready?
     es_ready = False
@@ -99,7 +87,6 @@ def get_image_exif(key):
 
     data = urllib2.urlopen("{0}/{1}".format(SOURCE_URL, key))
     image = data.read()
-    # This should log instead of LOGGER.info
     LOGGER.info('Downloading image: {}'.format(key))
     exif = get_exif(image)
     # Send the data to RabbitMQ
