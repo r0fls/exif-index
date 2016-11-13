@@ -1,11 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import requests
 import xml.etree.ElementTree
 import exifread
 import threading
-from cStringIO import StringIO
-import urllib2
-import Queue
+import io
+import urllib.request
 import json
 import logging
 import pika
@@ -20,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 # RabbitMQ connection
 credentials = pika.PlainCredentials('guest', 'guest')
 connection = pika.BlockingConnection(pika.ConnectionParameters(
-    host='localhost', port=5672))
+    host='rabbitmq', port=5672, retry_delay=1, connection_attempts=10))
 # Create a queue
 channel = connection.channel()
 channel.queue_declare(queue='exifs')
@@ -45,6 +44,7 @@ def index_image_exifs(keys=None):
     if not keys:
         keys = get_image_keys()
     for key in keys:
+        #curio.run(get_image_exif(key))
         thread = threading.Thread(target=get_image_exif, args=(key,))
         thread.start()
 
@@ -58,7 +58,6 @@ def index_image_exifs(keys=None):
             time.sleep(5)
 
     # Elastic Search is ready
-
     # It would be nice to do this concurrently too, but
     # I received a "Slow down" message from elasticsearch
     # So we'll do it sequentially. You could increase the
@@ -85,7 +84,7 @@ def get_image_exif(key):
     add the resulting key/value tuple to the queue.
     '''
 
-    data = urllib2.urlopen("{0}/{1}".format(SOURCE_URL, key))
+    data = urllib.request.urlopen("{0}/{1}".format(SOURCE_URL, key))
     image = data.read()
     LOGGER.info('Downloading image: {}'.format(key))
     exif = get_exif(image)
@@ -101,16 +100,16 @@ def get_exif(image):
     '''
     Extract the exif data from a raw image.
     '''
-    exif = exifread.process_file(StringIO(image), details=False)
+    exif = exifread.process_file(io.BytesIO(image), details=False)
     ret = dict(zip(exif.keys(),
                    # exif values are ifd tag instances, which may
                    # need recursive treatment. Here we convert to
                    # strings and ignore that possibility.
                    # We also ignore string encoding errors.
-               map(lambda x: unicode(str(x), errors='ignore'),
+               map(lambda x: str(x),
                    exif.values())))
     return json.dumps(ret)
 
 
 if __name__ == "__main__":
-    index_image_exifs(get_image_keys())
+    index_image_exifs()
